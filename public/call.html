@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Timbre - Propietario</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 16px; }
+    video { width: 100%; max-width: 360px; background: #000; border-radius: 12px; margin-top: 10px; }
+    #status { display: inline-block; padding: 8px 12px; background: #eee; border-radius: 999px; }
+  </style>
+</head>
+<body>
+
+  <h2>🏠 Propietario</h2>
+  <div id="status">Esperando…</div>
+
+  <h4>Tu cámara</h4>
+  <video id="localVideo" autoplay muted playsinline></video>
+
+  <h4>Visitante</h4>
+  <video id="remoteVideo" autoplay playsinline></video>
+
+<script>
+  const roomId = new URLSearchParams(window.location.search).get("room") || "FLIA.VEGA-BALDOVINO";
+
+  const statusEl = document.getElementById("status");
+  const localVideo = document.getElementById("localVideo");
+  const remoteVideo = document.getElementById("remoteVideo");
+
+  let pc = null;
+  let localStream = null;
+
+  const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
+  const ws = new WebSocket(wsProtocol + location.host);
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "join", roomId, role: "owner" }));
+    statusEl.textContent = "Esperando…";
+  };
+
+  ws.onmessage = async (event) => {
+    const msg = JSON.parse(event.data);
+
+    if (msg.type === "peer-joined") {
+      statusEl.textContent = "¡Alguien está tocando el timbre en casa!";
+      return;
+    }
+
+    if (msg.type === "offer") {
+      statusEl.textContent = "Conectando…";
+      await ensurePeer();
+
+      await pc.setRemoteDescription(msg.offer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      ws.send(JSON.stringify({ type: "answer", answer }));
+      statusEl.textContent = "En llamada";
+    }
+
+    if (msg.type === "candidate" && pc) {
+      try { await pc.addIceCandidate(msg.candidate); } catch {}
+    }
+
+    if (msg.type === "hangup" || msg.type === "peer-left") {
+      endCall();
+    }
+  };
+
+  async function ensurePeer() {
+    if (pc) return;
+
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localVideo.srcObject = localStream;
+
+    pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
+
+    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+
+    pc.ontrack = (event) => {
+      remoteVideo.srcObject = event.streams[0];
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        ws.send(JSON.stringify({ type: "candidate", candidate: event.candidate }));
+      }
+    };
+  }
+
+  function endCall() {
+    statusEl.textContent = "Esperando…";
+
+    if (pc) { pc.close(); pc = null; }
+
+    if (localStream) {
+      localStream.getTracks().forEach((t) => t.stop());
+      localStream = null;
+    }
+
+    localVideo.srcObject = null;
+    remoteVideo.srcObject = null;
+  }
+</script>
+
+</body>
+</html>
