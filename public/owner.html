@@ -2,43 +2,76 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Timbre - Propietario</title>
   <style>
-    body{font-family:system-ui;margin:16px}
-    video{width:100%;max-width:420px;background:#000;border-radius:12px;margin:8px 0}
-    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#eee}
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      margin: 16px;
+    }
+    video {
+      width: 100%;
+      max-width: 360px;
+      background: #000;
+      border-radius: 12px;
+      margin-top: 10px;
+    }
+    #status {
+      display: inline-block;
+      padding: 8px 12px;
+      background: #eee;
+      border-radius: 999px;
+      margin-bottom: 10px;
+    }
+    button {
+      padding: 12px 16px;
+      font-size: 15px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      margin-top: 8px;
+    }
   </style>
 </head>
 <body>
-  <h2>Propietario</h2>
-  <div class="pill" id="status">Esperando...</div>
 
-  <div>
-    <h4>Tu cámara</h4>
-    <video id="local" autoplay playsinline muted></video>
-    <h4>Visitante</h4>
-    <video id="remote" autoplay playsinline></video>
-  </div>
+  <h2>🏠 Propietario</h2>
+  <div id="status">Esperando…</div><br>
+
+  <button id="hangBtn" disabled>⛔ Finalizar llamada</button>
+
+  <h4>Tu cámara</h4>
+  <video id="localVideo" autoplay muted playsinline></video>
+
+  <h4>Visitante</h4>
+  <video id="remoteVideo" autoplay playsinline></video>
 
 <script>
-  const roomId = new URLSearchParams(location.search).get("room") || "FLIA.VEGA-BALDOVINO";
+  const roomId =
+    new URLSearchParams(window.location.search).get("room") ||
+    "FLIA.VEGA-BALDOVINO";
 
-  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host);
   const statusEl = document.getElementById("status");
-  const localVideo = document.getElementById("local");
-  const remoteVideo = document.getElementById("remote");
+  const hangBtn = document.getElementById("hangBtn");
+  const localVideo = document.getElementById("localVideo");
+  const remoteVideo = document.getElementById("remoteVideo");
 
-  let pc, localStream;
-  const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
+  let pc = null;
+  let localStream = null;
 
-  ws.onopen = () => ws.send(JSON.stringify({ type: "join", roomId, role: "owner" }));
+  const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
+  const ws = new WebSocket(wsProtocol + location.host);
 
-  ws.onmessage = async (ev) => {
-    const msg = JSON.parse(ev.data);
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "join", roomId, role: "owner" }));
+    statusEl.textContent = "Esperando…";
+  };
+
+  ws.onmessage = async (event) => {
+    const msg = JSON.parse(event.data);
 
     if (msg.type === "peer-joined") {
-      statusEl.textContent = "Alguien está tocando el timbre…";
+      statusEl.textContent = "¡Alguien está tocando el timbre en casa!";
       return;
     }
 
@@ -52,6 +85,7 @@
 
       ws.send(JSON.stringify({ type: "answer", answer }));
       statusEl.textContent = "En llamada";
+      hangBtn.disabled = false;
     }
 
     if (msg.type === "candidate" && pc) {
@@ -59,36 +93,64 @@
     }
 
     if (msg.type === "hangup" || msg.type === "peer-left") {
-      statusEl.textContent = "Esperando...";
-      cleanup();
+      endCall();
     }
   };
 
   async function ensurePeer() {
     if (pc) return;
 
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true
+    });
     localVideo.srcObject = localStream;
 
-    pc = new RTCPeerConnection({ iceServers });
+    pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    });
 
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    localStream.getTracks().forEach(track =>
+      pc.addTrack(track, localStream)
+    );
 
-    pc.ontrack = (e) => {
-      remoteVideo.srcObject = e.streams[0];
+    pc.ontrack = (event) => {
+      remoteVideo.srcObject = event.streams[0];
     };
 
-    pc.onicecandidate = (e) => {
-      if (e.candidate) ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        ws.send(JSON.stringify({
+          type: "candidate",
+          candidate: event.candidate
+        }));
+      }
     };
   }
 
-  function cleanup() {
-    if (pc) { pc.close(); pc = null; }
-    if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+  function endCall() {
+    statusEl.textContent = "Esperando…";
+    hangBtn.disabled = true;
+
+    if (pc) {
+      pc.close();
+      pc = null;
+    }
+
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+    }
+
     localVideo.srcObject = null;
     remoteVideo.srcObject = null;
   }
+
+  hangBtn.addEventListener("click", () => {
+    ws.send(JSON.stringify({ type: "hangup" }));
+    endCall();
+  });
 </script>
+
 </body>
 </html>
