@@ -10,35 +10,10 @@
   <meta name="theme-color" content="#1f3a8a">
 
   <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      margin: 16px;
-      background: #e8f1ff;
-    }
-    video {
-      width: 100%;
-      max-width: 360px;
-      background: #000;
-      border-radius: 12px;
-      margin-top: 10px;
-    }
-    #status {
-      display: inline-block;
-      padding: 8px 12px;
-      background: #ffffff;
-      border-radius: 999px;
-      margin-bottom: 10px;
-      font-weight: 600;
-    }
-    button {
-      padding: 12px 16px;
-      font-size: 15px;
-      border-radius: 10px;
-      border: none;
-      cursor: pointer;
-      margin-right: 8px;
-      margin-top: 6px;
-    }
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 16px; background: #e8f1ff; }
+    video { width: 100%; max-width: 360px; background: #000; border-radius: 12px; margin-top: 10px; }
+    #status { display:inline-block; padding:8px 12px; background:#fff; border-radius:999px; margin-bottom: 10px; font-weight: 600; }
+    button { padding: 12px 16px; font-size: 15px; border-radius: 10px; border: none; cursor: pointer; margin-right: 8px; margin-top: 6px; }
     #answerBtn { background: #22c55e; color: #fff; }
     #hangBtn { background: #ef4444; color: #fff; }
     #notifyBtn { background: #1f3a8a; color: #fff; }
@@ -52,7 +27,7 @@
 
   <button id="answerBtn" disabled>✅ Atender</button>
   <button id="hangBtn" disabled>⛔ Finalizar</button>
-  <button id="notifyBtn">🔔 Activar notificaciones</button>
+  <button id="notifyBtn">🔔 Activar notificaciones (Push)</button>
 
   <h4>Tu cámara</h4>
   <video id="localVideo" autoplay muted playsinline></video>
@@ -67,9 +42,7 @@
   }
 
   // ====== Config ======
-  const roomId =
-    new URLSearchParams(window.location.search).get("room") ||
-    "FLIA.VEGA-BALDOVINO";
+  const roomId = new URLSearchParams(window.location.search).get("room") || "FLIA.VEGA-BALDOVINO";
 
   const statusEl = document.getElementById("status");
   const answerBtn = document.getElementById("answerBtn");
@@ -107,11 +80,12 @@
       tone(1200, now, 0.4, 0.8);
       tone(700, now + 0.45, 0.6, 0.8);
 
-      setTimeout(() => ctx.close(), 1200);
+      setTimeout(() => ctx.close().catch(() => {}), 1200);
     } catch {}
   }
 
   function startRinging() {
+    if (ringTimer) return;
     playRing();
     ringTimer = setInterval(playRing, 2200);
   }
@@ -121,22 +95,60 @@
     ringTimer = null;
   }
 
-  // ====== Notificaciones ======
-  function tryNotify() {
-    if (Notification.permission === "granted") {
-      new Notification("Timbre", {
-        body: "¡Alguien está tocando el timbre en casa!"
-      });
-    }
+  // ====== PUSH: helpers ======
+  function urlBase64ToUint8Array(base64String) {
+    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const rawData = atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
+    return outputArray;
   }
 
-  notifyBtn.onclick = async () => {
-    if (!("Notification" in window)) {
-      alert("Tu navegador no soporta notificaciones");
-      return;
+  async function ensurePushSubscription() {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      throw new Error("Push no soportado en este navegador.");
     }
-    const p = await Notification.requestPermission();
-    if (p === "granted") alert("Notificaciones activadas");
+
+    // Esperar SW listo
+    const reg = await navigator.serviceWorker.ready;
+
+    // Public key desde server
+    const r = await fetch("/api/push/public-key");
+    const { publicKey } = await r.json();
+    if (!publicKey) throw new Error("No hay VAPID public key configurada.");
+
+    // Pedir permiso notificaciones
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") throw new Error("Permiso de notificaciones denegado.");
+
+    // Suscribir o reutilizar
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey)
+      });
+    }
+
+    // Enviar al server para esta room
+    const save = await fetch("/api/push/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ roomId, subscription: sub })
+    });
+
+    if (!save.ok) throw new Error("No se pudo guardar la suscripción.");
+  }
+
+  // Botón: activar PUSH real
+  notifyBtn.onclick = async () => {
+    try {
+      await ensurePushSubscription();
+      alert("✅ Push activado. Te va a llegar una notificación en la barra cuando toquen el timbre.");
+    } catch (e) {
+      alert("❌ No se pudo activar Push: " + (e?.message || "error"));
+    }
   };
 
   // ====== WebSocket ======
@@ -151,7 +163,6 @@
     if (msg.type === "peer-joined") {
       statusEl.textContent = "Alguien está tocando el timbre…";
       startRinging();
-      tryNotify();
     }
 
     if (msg.type === "offer") {
@@ -159,7 +170,6 @@
       answerBtn.disabled = false;
       statusEl.textContent = "Llamada entrante";
       startRinging();
-      tryNotify();
     }
 
     if (msg.type === "candidate" && pc) {
