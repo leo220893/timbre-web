@@ -5,33 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Timbre - Propietario</title>
   <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      margin: 16px;
-    }
-    video {
-      width: 100%;
-      max-width: 360px;
-      background: #000;
-      border-radius: 12px;
-      margin-top: 10px;
-    }
-    #status {
-      display: inline-block;
-      padding: 8px 12px;
-      background: #eee;
-      border-radius: 999px;
-      margin-bottom: 10px;
-    }
-    button {
-      padding: 12px 16px;
-      font-size: 15px;
-      border-radius: 10px;
-      border: none;
-      cursor: pointer;
-      margin-right: 8px;
-      margin-top: 6px;
-    }
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 16px; }
+    video { width: 100%; max-width: 360px; background: #000; border-radius: 12px; margin-top: 10px; }
+    #status { display:inline-block; padding:8px 12px; background:#eee; border-radius:999px; margin-bottom: 10px; }
+    button { padding: 12px 16px; font-size: 15px; border-radius: 10px; border: none; cursor: pointer; margin-right: 8px; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -50,9 +27,7 @@
   <video id="remoteVideo" autoplay playsinline></video>
 
 <script>
-  const roomId =
-    new URLSearchParams(window.location.search).get("room") ||
-    "FLIA.VEGA-BALDOVINO";
+  const roomId = new URLSearchParams(window.location.search).get("room") || "FLIA.VEGA-BALDOVINO";
 
   const statusEl = document.getElementById("status");
   const answerBtn = document.getElementById("answerBtn");
@@ -64,58 +39,85 @@
   let pc = null;
   let localStream = null;
   let pendingOffer = null;
-  let ringing = false;
 
   const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
   const ws = new WebSocket(wsProtocol + location.host);
 
-  /* =======================
-     SONIDO TIMBRE (ding-dong)
-     ======================= */
-  function dingDong() {
-    if (ringing) return;
-    ringing = true;
+  // ====== TIMBRE MÁS AUDIBLE (con repetición) ======
+  let ringTimer = null;
+  let isRinging = false;
 
+  function playRingOnce() {
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       const ctx = new AudioCtx();
       const now = ctx.currentTime;
 
-      function beep(freq, start, dur) {
+      // Utilidad: oscilador con envolvente
+      function tone(type, freq, start, dur, peakGain) {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
-        osc.type = "sine";
-        osc.frequency.value = freq;
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, start);
+
         gain.gain.setValueAtTime(0.0001, start);
-        gain.gain.exponentialRampToValueAtTime(0.3, start + 0.01);
+        gain.gain.exponentialRampToValueAtTime(peakGain, start + 0.01);
         gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+
         osc.connect(gain);
         gain.connect(ctx.destination);
+
         osc.start(start);
         osc.stop(start + dur);
       }
 
-      beep(880, now + 0.00, 0.18); // ding
-      beep(587, now + 0.22, 0.22); // dong
+      // "DING" más fuerte (capas)
+      tone("triangle", 1046.5, now + 0.00, 0.35, 0.7);
+      tone("sine",     1318.5, now + 0.00, 0.30, 0.5);
 
+      // "DONG" más grave y largo
+      tone("triangle",  659.3, now + 0.42, 0.55, 0.75);
+      tone("sine",      523.3, now + 0.42, 0.50, 0.55);
+
+      // Pequeño "eco" simulando campana (segunda pasada bajita)
+      tone("sine", 1046.5, now + 0.12, 0.25, 0.18);
+      tone("sine",  659.3, now + 0.62, 0.35, 0.15);
+
+      // Cerrar contexto luego
       setTimeout(() => {
         ctx.close().catch(() => {});
-        ringing = false;
-      }, 700);
+      }, 1400);
     } catch {
-      ringing = false;
+      // si el audio falla, no hacemos nada
     }
   }
 
-  /* =======================
-     NOTIFICACIÓN NAVEGADOR
-     ======================= */
+  function startRinging() {
+    if (isRinging) return;
+    isRinging = true;
+
+    // 1) sonar inmediatamente
+    playRingOnce();
+
+    // 2) repetir cada 2.2 segundos hasta atender/cortar
+    ringTimer = setInterval(() => {
+      playRingOnce();
+    }, 2200);
+  }
+
+  function stopRinging() {
+    isRinging = false;
+    if (ringTimer) {
+      clearInterval(ringTimer);
+      ringTimer = null;
+    }
+  }
+
+  // ====== NOTIFICACIÓN NAVEGADOR (opcional) ======
   function tryNotify() {
     if (!("Notification" in window)) return;
     if (Notification.permission === "granted") {
-      new Notification("Timbre", {
-        body: "¡Alguien está tocando el timbre en casa!"
-      });
+      new Notification("Timbre", { body: "¡Alguien está tocando el timbre en casa!" });
     }
   }
 
@@ -133,9 +135,7 @@
     }
   });
 
-  /* =======================
-     WEBSOCKET
-     ======================= */
+  // ====== WEBSOCKET ======
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: "join", roomId, role: "owner" }));
     statusEl.textContent = "Esperando…";
@@ -150,17 +150,17 @@
 
     if (msg.type === "peer-joined") {
       statusEl.textContent = "Alguien está tocando el timbre…";
-      dingDong();
+      startRinging();
       tryNotify();
       return;
     }
 
-    // ⚠️ NO atiende automáticamente
+    // NO atiende automático: guarda la offer
     if (msg.type === "offer") {
       pendingOffer = msg.offer;
       statusEl.textContent = "Llamada entrante";
       answerBtn.disabled = false;
-      dingDong();
+      startRinging();
       tryNotify();
       return;
     }
@@ -174,12 +174,11 @@
     }
   };
 
-  /* =======================
-     ATENDER
-     ======================= */
+  // ====== ATENDER ======
   answerBtn.addEventListener("click", async () => {
     if (!pendingOffer) return;
 
+    stopRinging();
     answerBtn.disabled = true;
     statusEl.textContent = "Conectando…";
 
@@ -196,9 +195,7 @@
     hangBtn.disabled = false;
   });
 
-  /* =======================
-     FINALIZAR
-     ======================= */
+  // ====== FINALIZAR ======
   hangBtn.addEventListener("click", () => {
     ws.send(JSON.stringify({ type: "hangup" }));
     endCall();
@@ -207,20 +204,14 @@
   async function ensurePeer() {
     if (pc) return;
 
-    localStream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true
-    });
-
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     localVideo.srcObject = localStream;
 
     pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
     });
 
-    localStream.getTracks().forEach(track =>
-      pc.addTrack(track, localStream)
-    );
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
     pc.ontrack = (event) => {
       remoteVideo.srcObject = event.streams[0];
@@ -228,24 +219,19 @@
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        ws.send(JSON.stringify({
-          type: "candidate",
-          candidate: event.candidate
-        }));
+        ws.send(JSON.stringify({ type: "candidate", candidate: event.candidate }));
       }
     };
   }
 
   function endCall() {
+    stopRinging();
     statusEl.textContent = "Esperando…";
     hangBtn.disabled = true;
     answerBtn.disabled = true;
     pendingOffer = null;
 
-    if (pc) {
-      pc.close();
-      pc = null;
-    }
+    if (pc) { pc.close(); pc = null; }
 
     if (localStream) {
       localStream.getTracks().forEach(t => t.stop());
