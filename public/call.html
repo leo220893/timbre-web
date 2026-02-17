@@ -35,10 +35,10 @@
 <body>
 
   <h2>🔔 Timbre</h2>
-  <div id="status">Estado: cargando…</div>
+  <div id="status">Estado: esperando…</div>
 
   <button id="callBtn">📞 Llamar</button>
-  <button id="hangBtn" disabled>⛔ Colgar</button>
+  <button id="hangBtn" disabled>⛔ Cancelar</button>
 
   <h4>Tu cámara</h4>
   <video id="localVideo" autoplay muted playsinline></video>
@@ -47,7 +47,6 @@
   <video id="remoteVideo" autoplay playsinline></video>
 
 <script>
-  // Sala (desde la URL o por defecto)
   const roomId =
     new URLSearchParams(window.location.search).get("room") ||
     "FLIA.VEGA-BALDOVINO";
@@ -64,40 +63,40 @@
   const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
   const ws = new WebSocket(wsProtocol + location.host);
 
-  statusEl.textContent = "Estado: conectando al servidor…";
-
   ws.onopen = () => {
-    statusEl.textContent = "Estado: conectado. Tocá “Llamar”.";
     ws.send(JSON.stringify({ type: "join", roomId, role: "caller" }));
+    statusEl.textContent = "Estado: listo para llamar";
   };
 
   ws.onerror = () => {
-    statusEl.textContent = "ERROR: no se pudo conectar al servidor.";
+    statusEl.textContent = "ERROR: no se pudo conectar";
   };
 
   ws.onmessage = async (event) => {
     const msg = JSON.parse(event.data);
 
-    if (!pc) return;
-
-    if (msg.type === "answer") {
-      statusEl.textContent = "Estado: en llamada";
+    if (msg.type === "answer" && pc) {
       await pc.setRemoteDescription(msg.answer);
+      statusEl.textContent = "Estado: en llamada";
+      return;
     }
 
-    if (msg.type === "candidate") {
+    if (msg.type === "candidate" && pc) {
       try { await pc.addIceCandidate(msg.candidate); } catch {}
+      return;
     }
 
-    if (msg.type === "peer-left" || msg.type === "hangup") {
+    if (msg.type === "hangup" || msg.type === "peer-left") {
       endCall("Llamada finalizada");
+      return;
     }
   };
 
   async function startCall() {
     try {
       callBtn.disabled = true;
-      statusEl.textContent = "Estado: solicitando cámara y micrófono…";
+      hangBtn.disabled = false;
+      statusEl.textContent = "Estado: llamando…";
 
       localStream = await navigator.mediaDevices.getUserMedia({
         video: true,
@@ -131,19 +130,17 @@
       await pc.setLocalDescription(offer);
 
       ws.send(JSON.stringify({ type: "offer", offer }));
-
-      hangBtn.disabled = false;
-      statusEl.textContent = "Estado: llamando…";
     } catch (err) {
       statusEl.textContent = "ERROR: " + err.message;
       callBtn.disabled = false;
+      hangBtn.disabled = true;
     }
   }
 
   function endCall(message) {
-    statusEl.textContent = "Estado: " + (message || "finalizada");
-    hangBtn.disabled = true;
+    statusEl.textContent = "Estado: " + (message || "cancelada");
     callBtn.disabled = false;
+    hangBtn.disabled = true;
 
     if (pc) {
       pc.close();
@@ -162,7 +159,7 @@
   callBtn.addEventListener("click", startCall);
   hangBtn.addEventListener("click", () => {
     ws.send(JSON.stringify({ type: "hangup" }));
-    endCall("colgada");
+    endCall("cancelada");
   });
 </script>
 
