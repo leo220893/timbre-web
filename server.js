@@ -4,78 +4,141 @@ const path = require("path");
 const WebSocket = require("ws");
 
 const app = express();
-
-// Healthcheck para Render
-app.get("/health", (req, res) => res.status(200).send("ok"));
-
-// Servir los HTML desde /public
-app.use(express.static(path.join(__dirname, "public")));
-
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// rooms = Map<roomId, Set<ws>>
+// ====== PWA files (content-type correcto) ======
+app.get("/manifest.webmanifest", (req, res) => {
+  res.type("application/manifest+json");
+  res.sendFile(path.join(__dirname, "public", "manifest.webmanifest"));
+});
+
+app.get("/sw.js", (req, res) => {
+  res.type("application/javascript");
+  res.sendFile(path.join(__dirname, "public", "sw.js"));
+});
+
+// ====== Health check ======
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// ====== Static ======
+app.use(express.static(path.join(__dirname, "public")));
+
+// ====== Signaling rooms ======
+// rooms: Map<roomId, { owner: WebSocket|null, caller: WebSocket|null }>
 const rooms = new Map();
 
-function joinRoom(ws, roomId) {
-  if (!roomId) return;
-  if (!rooms.has(roomId)) rooms.set(roomId, new Set());
-  rooms.get(roomId).add(ws);
-  ws.roomId = roomId;
+function safeSend(ws, obj) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify(obj));
+  } catch {}
 }
 
-function leaveRoom(ws) {
-  const roomId = ws.roomId;
-  if (!roomId) return;
-  const set = rooms.get(roomId);
-  if (!set) return;
-  set.delete(ws);
-  if (set.size === 0) rooms.delete(roomId);
+function getOrCreateRoom(roomId) {
+  if (!rooms.has(roomId)) rooms.set(roomId, { owner: null, caller: null });
+  return rooms.get(roomId);
 }
 
-function broadcastToRoom(roomId, sender, data) {
-  const set = rooms.get(roomId);
-  if (!set) return;
-  for (const client of set) {
-    if (client !== sender && client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify(data));
-    }
-  }
+function cleanupRoomIfEmpty(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  const ownerGone = !room.owner || room.owner.readyState !== WebSocket.OPEN;
+  const callerGone = !room.caller || room.caller.readyState !== WebSocket.OPEN;
+  if (ownerGone && callerGone) rooms.delete(roomId);
 }
 
+// ====== WebSocket handling ======
 wss.on("connection", (ws) => {
-  ws.on("message", (raw) => {
+  ws._roomId = null;
+  ws._role = null;
+
+  ws.on("message", (data) => {
     let msg;
     try {
-      msg = JSON.parse(raw.toString());
+      msg = JSON.parse(data.toString());
     } catch {
       return;
     }
 
-    // Unirse a la sala
-    if (msg.type === "join" && msg.roomId) {
-      joinRoom(ws, msg.roomId);
-      broadcastToRoom(ws.roomId, ws, { type: "peer-joined" });
+    // JOIN
+    if (msg.type === "join") {
+      const roomId = String(msg.roomId || "").trim();
+      const role = msg.role === "owner" ? "owner" : "caller";
+      if (!roomId) return;
+
+      ws._roomId = roomId;
+      ws._role = role;
+
+      const room = getOrCreateRoom(roomId);
+
+      // Si ya había alguien en ese rol, lo reemplazamos
+      if (role === "owner") room.owner = ws;
+      else room.caller = ws;
+
+      // Avisar al otro lado que alguien se conectó
+      const other = role === "owner" ? room.caller : room.owner;
+      safeSend(other, { type: "peer-joined", role });
+
       return;
     }
 
-    // Ignorar si no está en sala
-    if (!ws.roomId) return;
+    // Si no está unido a una sala, ignorar
+    const roomId = ws._roomId;
+    if (!roomId) return;
 
-    // Reenviar offer/answer/candidate/hangup al otro peer
-    broadcastToRoom(ws.roomId, ws, msg);
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    const other = ws._role === "owner" ? room.caller : room.owner;
+
+    // Relay signaling
+    if (msg.type === "offer") {
+      safeSend(other, { type: "offer", offer: msg.offer });
+      return;
+    }
+
+    if (msg.type === "answer") {
+      safeSend(other, { type: "answer", answer: msg.answer });
+      return;
+    }
+
+    if (msg.type === "candidate") {
+      safeSend(other, { type: "candidate", candidate: msg.candidate });
+      return;
+    }
+
+    if (msg.type === "hangup") {
+      safeSend(other, { type: "hangup" });
+      return;
+    }
   });
 
   ws.on("close", () => {
-    const roomId = ws.roomId;
-    leaveRoom(ws);
-    if (roomId) broadcastToRoom(roomId, ws, { type: "peer-left" });
+    const roomId = ws._roomId;
+    if (!roomId) return;
+
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    // Liberar el slot correspondiente
+    if (room.owner === ws) room.owner = null;
+    if (room.caller === ws) room.caller = null;
+
+    // Avisar al otro lado
+    const other = ws._role === "owner" ? room.caller : room.owner;
+    safeSend(other, { type: "peer-left" });
+
+    cleanupRoomIfEmpty(roomId);
+  });
+
+  ws.on("error", () => {
+    // no-op, close handler hará limpieza
   });
 });
 
-// Render usa PORT
+// ====== Start ======
 const PORT = process.env.PORT || 3000;
-
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor listo en puerto ${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });

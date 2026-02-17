@@ -1,0 +1,10 @@
+{
+  "name": "Timbre VEGA // BALDOVINO",
+  "short_name": "Timbre Casa",
+  "start_url": "/owner.html?room=FLIA.VEGA-BALDOVINO",
+  "display": "standalone",
+  "background_color": "#e8f1ff",
+  "theme_color": "#1f3a8a",
+  "scope": "/",
+  "description": "Timbre digital con videollamada por QR."
+}
