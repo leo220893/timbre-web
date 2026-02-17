@@ -29,16 +29,19 @@
       border-radius: 10px;
       border: none;
       cursor: pointer;
-      margin-top: 8px;
+      margin-right: 8px;
+      margin-top: 6px;
     }
   </style>
 </head>
 <body>
 
   <h2>🏠 Propietario</h2>
-  <div id="status">Esperando…</div><br>
+  <div id="status">Conectando…</div><br>
 
-  <button id="hangBtn" disabled>⛔ Finalizar llamada</button>
+  <button id="answerBtn" disabled>✅ Atender</button>
+  <button id="hangBtn" disabled>⛔ Finalizar</button>
+  <button id="notifyBtn">🔔 Activar notificaciones</button>
 
   <h4>Tu cámara</h4>
   <video id="localVideo" autoplay muted playsinline></video>
@@ -52,40 +55,114 @@
     "FLIA.VEGA-BALDOVINO";
 
   const statusEl = document.getElementById("status");
+  const answerBtn = document.getElementById("answerBtn");
   const hangBtn = document.getElementById("hangBtn");
+  const notifyBtn = document.getElementById("notifyBtn");
   const localVideo = document.getElementById("localVideo");
   const remoteVideo = document.getElementById("remoteVideo");
 
   let pc = null;
   let localStream = null;
+  let pendingOffer = null;
+  let ringing = false;
 
   const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
   const ws = new WebSocket(wsProtocol + location.host);
 
+  /* =======================
+     SONIDO TIMBRE (ding-dong)
+     ======================= */
+  function dingDong() {
+    if (ringing) return;
+    ringing = true;
+
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+      const now = ctx.currentTime;
+
+      function beep(freq, start, dur) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(0.3, start + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(start);
+        osc.stop(start + dur);
+      }
+
+      beep(880, now + 0.00, 0.18); // ding
+      beep(587, now + 0.22, 0.22); // dong
+
+      setTimeout(() => {
+        ctx.close().catch(() => {});
+        ringing = false;
+      }, 700);
+    } catch {
+      ringing = false;
+    }
+  }
+
+  /* =======================
+     NOTIFICACIÓN NAVEGADOR
+     ======================= */
+  function tryNotify() {
+    if (!("Notification" in window)) return;
+    if (Notification.permission === "granted") {
+      new Notification("Timbre", {
+        body: "¡Alguien está tocando el timbre en casa!"
+      });
+    }
+  }
+
+  notifyBtn.addEventListener("click", async () => {
+    if (!("Notification" in window)) {
+      alert("Tu navegador no soporta notificaciones.");
+      return;
+    }
+    const perm = await Notification.requestPermission();
+    if (perm === "granted") {
+      alert("Notificaciones activadas.");
+      tryNotify();
+    } else {
+      alert("Notificaciones no permitidas.");
+    }
+  });
+
+  /* =======================
+     WEBSOCKET
+     ======================= */
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: "join", roomId, role: "owner" }));
     statusEl.textContent = "Esperando…";
+  };
+
+  ws.onerror = () => {
+    statusEl.textContent = "ERROR: no conecta al servidor";
   };
 
   ws.onmessage = async (event) => {
     const msg = JSON.parse(event.data);
 
     if (msg.type === "peer-joined") {
-      statusEl.textContent = "¡Alguien está tocando el timbre en casa!";
+      statusEl.textContent = "Alguien está tocando el timbre…";
+      dingDong();
+      tryNotify();
       return;
     }
 
+    // ⚠️ NO atiende automáticamente
     if (msg.type === "offer") {
-      statusEl.textContent = "Conectando…";
-      await ensurePeer();
-
-      await pc.setRemoteDescription(msg.offer);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      ws.send(JSON.stringify({ type: "answer", answer }));
-      statusEl.textContent = "En llamada";
-      hangBtn.disabled = false;
+      pendingOffer = msg.offer;
+      statusEl.textContent = "Llamada entrante";
+      answerBtn.disabled = false;
+      dingDong();
+      tryNotify();
+      return;
     }
 
     if (msg.type === "candidate" && pc) {
@@ -97,6 +174,36 @@
     }
   };
 
+  /* =======================
+     ATENDER
+     ======================= */
+  answerBtn.addEventListener("click", async () => {
+    if (!pendingOffer) return;
+
+    answerBtn.disabled = true;
+    statusEl.textContent = "Conectando…";
+
+    await ensurePeer();
+    await pc.setRemoteDescription(pendingOffer);
+
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    ws.send(JSON.stringify({ type: "answer", answer }));
+
+    pendingOffer = null;
+    statusEl.textContent = "En llamada";
+    hangBtn.disabled = false;
+  });
+
+  /* =======================
+     FINALIZAR
+     ======================= */
+  hangBtn.addEventListener("click", () => {
+    ws.send(JSON.stringify({ type: "hangup" }));
+    endCall();
+  });
+
   async function ensurePeer() {
     if (pc) return;
 
@@ -104,6 +211,7 @@
       video: true,
       audio: true
     });
+
     localVideo.srcObject = localStream;
 
     pc = new RTCPeerConnection({
@@ -131,6 +239,8 @@
   function endCall() {
     statusEl.textContent = "Esperando…";
     hangBtn.disabled = true;
+    answerBtn.disabled = true;
+    pendingOffer = null;
 
     if (pc) {
       pc.close();
@@ -145,11 +255,6 @@
     localVideo.srcObject = null;
     remoteVideo.srcObject = null;
   }
-
-  hangBtn.addEventListener("click", () => {
-    ws.send(JSON.stringify({ type: "hangup" }));
-    endCall();
-  });
 </script>
 
 </body>
