@@ -1,249 +1,159 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Timbre – Propietario</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Modo Propietario</title>
 
-  <!-- PWA -->
-  <link rel="manifest" href="/manifest.webmanifest">
-  <meta name="theme-color" content="#1f3a8a">
+<style>
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #e8f1ff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
 
-  <style>
-    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 16px; background: #e8f1ff; }
-    video { width: 100%; max-width: 360px; background: #000; border-radius: 12px; margin-top: 10px; }
-    #status { display:inline-block; padding:8px 12px; background:#fff; border-radius:999px; margin-bottom: 10px; font-weight: 600; }
-    button { padding: 12px 16px; font-size: 15px; border-radius: 10px; border: none; cursor: pointer; margin-right: 8px; margin-top: 6px; }
-    #answerBtn { background: #22c55e; color: #fff; }
-    #hangBtn { background: #ef4444; color: #fff; }
-    #notifyBtn { background: #1f3a8a; color: #fff; }
-  </style>
+header {
+  background: #1f3a8a;
+  color: white;
+  width: 100%;
+  text-align: center;
+  padding: 15px;
+  font-weight: bold;
+  font-size: 18px;
+}
+
+#status {
+  margin: 15px;
+  font-size: 16px;
+  font-weight: bold;
+  color: #1f3a8a;
+}
+
+video {
+  width: 95%;
+  max-width: 500px;
+  border-radius: 12px;
+  background: black;
+}
+
+button {
+  margin: 10px;
+  padding: 12px 20px;
+  border: none;
+  border-radius: 8px;
+  font-size: 16px;
+  background: #1f3a8a;
+  color: white;
+}
+
+button.danger {
+  background: #b91c1c;
+}
+</style>
 </head>
+
 <body>
 
-  <h2>🏠 Timbre – Familia VEGA // BALDOVINO</h2>
+<header>🔔 Timbre Digital - Propietario</header>
 
-  <div id="status">Conectando…</div><br>
+<div id="status">Esperando llamada...</div>
 
-  <button id="answerBtn" disabled>✅ Atender</button>
-  <button id="hangBtn" disabled>⛔ Finalizar</button>
-  <button id="notifyBtn">🔔 Activar notificaciones (Push)</button>
+<video id="localVideo" autoplay playsinline muted></video>
+<video id="remoteVideo" autoplay playsinline></video>
 
-  <h4>Tu cámara</h4>
-  <video id="localVideo" autoplay muted playsinline></video>
-
-  <h4>Visitante</h4>
-  <video id="remoteVideo" autoplay playsinline></video>
+<button id="btnAtender">Atender</button>
+<button id="btnColgar" class="danger" style="display:none;">Colgar</button>
 
 <script>
-  // ====== PWA: registrar Service Worker ======
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("/sw.js").catch(() => {});
-  }
+const params = new URLSearchParams(window.location.search);
+const room = params.get("room");
 
-  // ====== Config ======
-  const roomId = new URLSearchParams(window.location.search).get("room") || "FLIA.VEGA-BALDOVINO";
+let localStream;
+let peerConnection;
+let isRinging = false;
 
-  const statusEl = document.getElementById("status");
-  const answerBtn = document.getElementById("answerBtn");
-  const hangBtn = document.getElementById("hangBtn");
-  const notifyBtn = document.getElementById("notifyBtn");
-  const localVideo = document.getElementById("localVideo");
-  const remoteVideo = document.getElementById("remoteVideo");
-
-  let pc = null;
-  let localStream = null;
-  let pendingOffer = null;
-
-  const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
-  const ws = new WebSocket(wsProtocol + location.host);
-
-  // ====== Timbre fuerte y repetitivo ======
-  let ringTimer = null;
-  function playRing() {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const now = ctx.currentTime;
-
-      function tone(freq, start, dur, vol) {
-        const o = ctx.createOscillator();
-        const g = ctx.createGain();
-        o.frequency.value = freq;
-        o.type = "triangle";
-        g.gain.setValueAtTime(0.001, start);
-        g.gain.exponentialRampToValueAtTime(vol, start + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.001, start + dur);
-        o.connect(g); g.connect(ctx.destination);
-        o.start(start); o.stop(start + dur);
-      }
-
-      tone(1200, now, 0.4, 0.8);
-      tone(700, now + 0.45, 0.6, 0.8);
-
-      setTimeout(() => ctx.close().catch(() => {}), 1200);
-    } catch {}
-  }
-
-  function startRinging() {
-    if (ringTimer) return;
-    playRing();
-    ringTimer = setInterval(playRing, 2200);
-  }
-
-  function stopRinging() {
-    if (ringTimer) clearInterval(ringTimer);
-    ringTimer = null;
-  }
-
-  // ====== PUSH: helpers ======
-  function urlBase64ToUint8Array(base64String) {
-    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
-    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
-    const rawData = atob(base64);
-    const outputArray = new Uint8Array(rawData.length);
-    for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
-    return outputArray;
-  }
-
-  async function ensurePushSubscription() {
-    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-      throw new Error("Push no soportado en este navegador.");
+// ---------- NOTIFICACIÓN ANDROID ----------
+function notifyAndroidRing() {
+  try {
+    if (window.Android && Android.ring) {
+      Android.ring();
     }
+  } catch(e) {}
+}
 
-    // Esperar SW listo
-    const reg = await navigator.serviceWorker.ready;
-
-    // Public key desde server
-    const r = await fetch("/api/push/public-key");
-    const { publicKey } = await r.json();
-    if (!publicKey) throw new Error("No hay VAPID public key configurada.");
-
-    // Pedir permiso notificaciones
-    const perm = await Notification.requestPermission();
-    if (perm !== "granted") throw new Error("Permiso de notificaciones denegado.");
-
-    // Suscribir o reutilizar
-    let sub = await reg.pushManager.getSubscription();
-    if (!sub) {
-      sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(publicKey)
-      });
+function clearAndroidRing() {
+  try {
+    if (window.Android && Android.clearRing) {
+      Android.clearRing();
     }
+  } catch(e) {}
+}
 
-    // Enviar al server para esta room
-    const save = await fetch("/api/push/subscribe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ roomId, subscription: sub })
-    });
+// ---------- SIMULADOR DE ENTRADA DE LLAMADA ----------
+// ⚠️ Acá reemplazá con tu lógica real de señalización
+// Esto simula que alguien llama después de 3 segundos
+setTimeout(() => {
+  incomingCall();
+}, 3000);
 
-    if (!save.ok) throw new Error("No se pudo guardar la suscripción.");
-  }
+function incomingCall() {
+  if (isRinging) return;
 
-  // Botón: activar PUSH real
-  notifyBtn.onclick = async () => {
-    try {
-      await ensurePushSubscription();
-      alert("✅ Push activado. Te va a llegar una notificación en la barra cuando toquen el timbre.");
-    } catch (e) {
-      alert("❌ No se pudo activar Push: " + (e?.message || "error"));
-    }
+  isRinging = true;
+  document.getElementById("status").innerText = "📲 Alguien está llamando...";
+  notifyAndroidRing();
+}
+
+// ---------- WEBRTC ----------
+async function initMedia() {
+  localStream = await navigator.mediaDevices.getUserMedia({
+    video: true,
+    audio: true
+  });
+
+  document.getElementById("localVideo").srcObject = localStream;
+}
+
+async function startCall() {
+  await initMedia();
+
+  peerConnection = new RTCPeerConnection();
+
+  localStream.getTracks().forEach(track => {
+    peerConnection.addTrack(track, localStream);
+  });
+
+  peerConnection.ontrack = event => {
+    document.getElementById("remoteVideo").srcObject = event.streams[0];
   };
 
-  // ====== WebSocket ======
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ type: "join", roomId, role: "owner" }));
-    statusEl.textContent = "Esperando…";
-  };
+  document.getElementById("status").innerText = "🎥 Llamada en curso";
+  document.getElementById("btnColgar").style.display = "inline-block";
+  document.getElementById("btnAtender").style.display = "none";
 
-  ws.onmessage = async (event) => {
-    const msg = JSON.parse(event.data);
+  clearAndroidRing();
+}
 
-    if (msg.type === "peer-joined") {
-      statusEl.textContent = "Alguien está tocando el timbre…";
-      startRinging();
-    }
-
-    if (msg.type === "offer") {
-      pendingOffer = msg.offer;
-      answerBtn.disabled = false;
-      statusEl.textContent = "Llamada entrante";
-      startRinging();
-    }
-
-    if (msg.type === "candidate" && pc) {
-      try { await pc.addIceCandidate(msg.candidate); } catch {}
-    }
-
-    if (msg.type === "hangup" || msg.type === "peer-left") {
-      endCall();
-    }
-  };
-
-  // ====== Atender ======
-  answerBtn.onclick = async () => {
-    if (!pendingOffer) return;
-
-    stopRinging();
-    answerBtn.disabled = true;
-    statusEl.textContent = "Conectando…";
-
-    await ensurePeer();
-    await pc.setRemoteDescription(pendingOffer);
-
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    ws.send(JSON.stringify({ type: "answer", answer }));
-
-    pendingOffer = null;
-    hangBtn.disabled = false;
-    statusEl.textContent = "En llamada";
-  };
-
-  // ====== Finalizar ======
-  hangBtn.onclick = () => {
-    ws.send(JSON.stringify({ type: "hangup" }));
-    endCall();
-  };
-
-  async function ensurePeer() {
-    if (pc) return;
-
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    localVideo.srcObject = localStream;
-
-    pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-    });
-
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-
-    pc.ontrack = e => remoteVideo.srcObject = e.streams[0];
-    pc.onicecandidate = e => {
-      if (e.candidate) {
-        ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
-      }
-    };
+function endCall() {
+  if (peerConnection) peerConnection.close();
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
   }
 
-  function endCall() {
-    stopRinging();
-    statusEl.textContent = "Esperando…";
-    answerBtn.disabled = true;
-    hangBtn.disabled = true;
-    pendingOffer = null;
+  document.getElementById("status").innerText = "Esperando llamada...";
+  document.getElementById("btnColgar").style.display = "none";
+  document.getElementById("btnAtender").style.display = "inline-block";
 
-    if (pc) { pc.close(); pc = null; }
-    if (localStream) {
-      localStream.getTracks().forEach(t => t.stop());
-      localStream = null;
-    }
+  clearAndroidRing();
+  isRinging = false;
+}
 
-    localVideo.srcObject = null;
-    remoteVideo.srcObject = null;
-  }
+document.getElementById("btnAtender").addEventListener("click", startCall);
+document.getElementById("btnColgar").addEventListener("click", endCall);
+
 </script>
 
 </body>
