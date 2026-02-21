@@ -30,6 +30,8 @@ header {
   font-size: 16px;
   font-weight: bold;
   color: #1f3a8a;
+  text-align: center;
+  padding: 0 10px;
 }
 
 video {
@@ -37,10 +39,11 @@ video {
   max-width: 500px;
   border-radius: 12px;
   background: black;
+  margin-bottom: 8px;
 }
 
 button {
-  margin: 10px;
+  margin: 10px 8px;
   padding: 12px 20px;
   border: none;
   border-radius: 8px;
@@ -49,8 +52,14 @@ button {
   color: white;
 }
 
-button.danger {
-  background: #b91c1c;
+button.danger { background: #b91c1c; }
+button.secondary { background: #334155; }
+
+.row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
 }
 </style>
 </head>
@@ -64,12 +73,16 @@ button.danger {
 <video id="localVideo" autoplay playsinline muted></video>
 <video id="remoteVideo" autoplay playsinline></video>
 
-<button id="btnAtender">Atender</button>
-<button id="btnColgar" class="danger" style="display:none;">Colgar</button>
+<div class="row">
+  <button id="btnAtender">Atender</button>
+  <button id="btnColgar" class="danger" style="display:none;">Colgar</button>
+  <button id="btnTestRing" class="secondary" style="display:none;">Probar timbre</button>
+</div>
 
 <script>
 const params = new URLSearchParams(window.location.search);
 const room = params.get("room");
+const testMode = params.get("test") === "1";
 
 let localStream;
 let peerConnection;
@@ -78,30 +91,19 @@ let isRinging = false;
 // ---------- NOTIFICACIÓN ANDROID ----------
 function notifyAndroidRing() {
   try {
-    if (window.Android && Android.ring) {
-      Android.ring();
-    }
+    if (window.Android && Android.ring) Android.ring();
   } catch(e) {}
 }
 
 function clearAndroidRing() {
   try {
-    if (window.Android && Android.clearRing) {
-      Android.clearRing();
-    }
+    if (window.Android && Android.clearRing) Android.clearRing();
   } catch(e) {}
 }
 
-// ---------- SIMULADOR DE ENTRADA DE LLAMADA ----------
-// ⚠️ Acá reemplazá con tu lógica real de señalización
-// Esto simula que alguien llama después de 3 segundos
-setTimeout(() => {
-  incomingCall();
-}, 3000);
-
+// ---------- ENTRADA DE LLAMADA (SEÑAL REAL) ----------
 function incomingCall() {
   if (isRinging) return;
-
   isRinging = true;
   document.getElementById("status").innerText = "📲 Alguien está llamando...";
   notifyAndroidRing();
@@ -109,39 +111,61 @@ function incomingCall() {
 
 // ---------- WEBRTC ----------
 async function initMedia() {
-  localStream = await navigator.mediaDevices.getUserMedia({
-    video: true,
-    audio: true
-  });
-
+  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
   document.getElementById("localVideo").srcObject = localStream;
 }
 
 async function startCall() {
-  await initMedia();
+  // Si todavía no estaba sonando, igual te dejo atender (por si tu lógica real abre directo)
+  try {
+    await initMedia();
 
-  peerConnection = new RTCPeerConnection();
+    peerConnection = new RTCPeerConnection();
 
-  localStream.getTracks().forEach(track => {
-    peerConnection.addTrack(track, localStream);
-  });
+    localStream.getTracks().forEach(track => {
+      peerConnection.addTrack(track, localStream);
+    });
 
-  peerConnection.ontrack = event => {
-    document.getElementById("remoteVideo").srcObject = event.streams[0];
-  };
+    peerConnection.ontrack = event => {
+      document.getElementById("remoteVideo").srcObject = event.streams[0];
+    };
 
-  document.getElementById("status").innerText = "🎥 Llamada en curso";
-  document.getElementById("btnColgar").style.display = "inline-block";
-  document.getElementById("btnAtender").style.display = "none";
+    document.getElementById("status").innerText = "🎥 Llamada en curso";
+    document.getElementById("btnColgar").style.display = "inline-block";
+    document.getElementById("btnAtender").style.display = "none";
 
-  clearAndroidRing();
+    clearAndroidRing();
+    isRinging = false;
+
+    // ⚠️ IMPORTANTE:
+    // Acá es donde tu app real debería:
+    // - recibir OFFER del visitante por tu señalización
+    // - setRemoteDescription(offer)
+    // - createAnswer()
+    // - setLocalDescription(answer)
+    // - enviar ANSWER al visitante
+    //
+    // Este archivo NO incluye tu señalización, solo el UI + WebRTC base.
+
+  } catch (err) {
+    document.getElementById("status").innerText = "❌ Error al iniciar cámara/mic: " + (err?.message || err);
+    // Si falló, limpiamos ring para no quedar colgado
+    clearAndroidRing();
+    isRinging = false;
+  }
 }
 
 function endCall() {
-  if (peerConnection) peerConnection.close();
+  try { if (peerConnection) peerConnection.close(); } catch(e) {}
+  peerConnection = null;
+
   if (localStream) {
-    localStream.getTracks().forEach(track => track.stop());
+    try { localStream.getTracks().forEach(track => track.stop()); } catch(e) {}
   }
+  localStream = null;
+
+  document.getElementById("localVideo").srcObject = null;
+  document.getElementById("remoteVideo").srcObject = null;
 
   document.getElementById("status").innerText = "Esperando llamada...";
   document.getElementById("btnColgar").style.display = "none";
@@ -154,6 +178,17 @@ function endCall() {
 document.getElementById("btnAtender").addEventListener("click", startCall);
 document.getElementById("btnColgar").addEventListener("click", endCall);
 
+// ---------- TEST SEGURO (solo si &test=1) ----------
+if (testMode) {
+  const btn = document.getElementById("btnTestRing");
+  btn.style.display = "inline-block";
+  btn.addEventListener("click", incomingCall);
+}
+
+// ---------- VALIDACIÓN ROOM ----------
+if (!room) {
+  document.getElementById("status").innerText = "⚠️ Falta el parámetro ?room=...";
+}
 </script>
 
 </body>
