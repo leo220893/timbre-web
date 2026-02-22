@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Modo Propietario</title>
+  <style>
+    body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#e8f1ff;display:flex;flex-direction:column;align-items:center}
+    header{background:#1f3a8a;color:#fff;width:100%;text-align:center;padding:14px 10px;font-weight:700;font-size:18px}
+    #status{margin:14px 12px;font-size:16px;font-weight:700;color:#1f3a8a;text-align:center}
+    .wrap{width:95%;max-width:520px;display:flex;flex-direction:column;gap:10px}
+    video{width:100%;border-radius:12px;background:#000;min-height:180px}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    button{flex:1;min-width:140px;padding:12px 16px;border:0;border-radius:10px;font-size:16px;background:#1f3a8a;color:#fff;font-weight:700}
+    button.danger{background:#b91c1c}
+    button:disabled{opacity:.55}
+    .hint{font-size:12px;color:#334155;text-align:center;margin-bottom:10px}
+  </style>
+</head>
+<body>
+  <header>🔔 Timbre Digital - Propietario</header>
+
+  <div id="status">Conectando…</div>
+
+  <div class="wrap">
+    <video id="localVideo" autoplay playsinline muted></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+
+    <div class="row">
+      <button id="btnAtender" disabled>Atender</button>
+      <button id="btnColgar" class="danger" style="display:none;">Colgar</button>
+    </div>
+
+    <div class="hint">Tip: si el visitante llama, acá debería sonar y aparecer “Alguien está llamando…”.</div>
+  </div>
+
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const roomId = params.get("room") || "FLIA.VEGA-BALDOVINO";
+
+  const statusEl = document.getElementById("status");
+  const btnAtender = document.getElementById("btnAtender");
+  const btnColgar = document.getElementById("btnColgar");
+  const localVideo = document.getElementById("localVideo");
+  const remoteVideo = document.getElementById("remoteVideo");
+
+  let ws;
+  let pc = null;
+  let localStream = null;
+
+  let pendingOffer = null;
+  let ringing = false;
+
+  function setStatus(t){ statusEl.textContent = t; }
+
+  function notifyAndroidRing(){
+    try { if (window.Android && Android.ring) Android.ring(); } catch(e){}
+  }
+  function clearAndroidRing(){
+    try { if (window.Android && Android.clearRing) Android.clearRing(); } catch(e){}
+  }
+
+  function wsUrl(){
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    return `${proto}//${location.host}`;
+  }
+
+  function send(obj){
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }
+
+  async function ensureMedia(){
+    if (localStream) return localStream;
+    localStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+    localVideo.srcObject = localStream;
+    return localStream;
+  }
+
+  function createPc(){
+    pc = new RTCPeerConnection();
+    pc.onicecandidate = (e) => {
+      if (e.candidate) send({ type:"candidate", candidate:e.candidate });
+    };
+    pc.ontrack = (e) => {
+      remoteVideo.srcObject = e.streams[0];
+    };
+    return pc;
+  }
+
+  function resetUi(){
+    btnAtender.style.display = "inline-block";
+    btnColgar.style.display = "none";
+    btnAtender.disabled = true;
+    ringing = false;
+    pendingOffer = null;
+    clearAndroidRing();
+  }
+
+  async function atender(){
+    try{
+      if (!pendingOffer){
+        setStatus("No hay llamada entrante…");
+        btnAtender.disabled = true;
+        return;
+      }
+
+      btnAtender.disabled = true;
+
+      await ensureMedia();
+      createPc();
+
+      // Agregar tracks
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+      // Setear offer pendiente y responder
+      await pc.setRemoteDescription(new RTCSessionDescription(pendingOffer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      send({ type:"answer", answer });
+
+      setStatus("🎥 Llamada en curso");
+      btnAtender.style.display = "none";
+      btnColgar.style.display = "inline-block";
+      clearAndroidRing();
+      ringing = false;
+    } catch(err){
+      console.error(err);
+      setStatus("Error al atender (revisá permisos de cámara/micrófono).");
+      btnAtender.disabled = false;
+    }
+  }
+
+  function colgar(){
+    try{ send({ type:"hangup" }); } catch(e){}
+    endCallLocal();
+  }
+
+  function endCallLocal(){
+    try{ if (pc) pc.close(); } catch(e){}
+    pc = null;
+    pendingOffer = null;
+
+    try{
+      if (localStream){
+        localStream.getTracks().forEach(t => t.stop());
+      }
+    } catch(e){}
+    localStream = null;
+    localVideo.srcObject = null;
+    remoteVideo.srcObject = null;
+
+    setStatus("Esperando llamada…");
+    resetUi();
+  }
+
+  btnAtender.addEventListener("click", atender);
+  btnColgar.addEventListener("click", colgar);
+
+  function connect(){
+    setStatus("Conectando a la sala…");
+    ws = new WebSocket(wsUrl());
+
+    ws.onopen = () => {
+      send({ type:"join", roomId, role:"owner" });
+      setStatus("Esperando llamada…");
+      resetUi();
+    };
+
+    ws.onmessage = async (ev) => {
+      let msg;
+      try{ msg = JSON.parse(ev.data); } catch { return; }
+
+      if (msg.type === "ring"){
+        if (!ringing){
+          ringing = true;
+          setStatus("📲 ¡Alguien está tocando el timbre en casa!");
+          notifyAndroidRing();
+          btnAtender.disabled = false;
+        }
+        return;
+      }
+
+      if (msg.type === "offer"){
+        pendingOffer = msg.offer;
+        // Avisar (si todavía no había ring)
+        if (!ringing){
+          ringing = true;
+          setStatus("📲 ¡Alguien está tocando el timbre en casa!");
+          notifyAndroidRing();
+        }
+        btnAtender.disabled = false;
+        return;
+      }
+
+      if (msg.type === "candidate" && pc){
+        try{ await pc.addIceCandidate(msg.candidate); } catch(e){}
+        return;
+      }
+
+      if (msg.type === "hangup"){
+        endCallLocal();
+        return;
+      }
+
+      if (msg.type === "peer-left"){
+        endCallLocal();
+      }
+    };
+
+    ws.onclose = () => {
+      setStatus("Desconectado. Reintentando…");
+      clearAndroidRing();
+      setTimeout(connect, 1200);
+    };
+
+    ws.onerror = () => {
+      try{ ws.close(); } catch(e){}
+    };
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>
