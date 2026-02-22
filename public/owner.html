@@ -1,195 +1,86 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Modo Propietario</title>
+// server.js
+const path = require("path");
+const http = require("http");
+const express = require("express");
+const WebSocket = require("ws");
 
-<style>
-body {
-  margin: 0;
-  font-family: Arial, sans-serif;
-  background: #e8f1ff;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
+const app = express();
 
-header {
-  background: #1f3a8a;
-  color: white;
-  width: 100%;
-  text-align: center;
-  padding: 15px;
-  font-weight: bold;
-  font-size: 18px;
-}
+// Servir estáticos
+app.use(express.static(path.join(__dirname, "public")));
 
-#status {
-  margin: 15px;
-  font-size: 16px;
-  font-weight: bold;
-  color: #1f3a8a;
-  text-align: center;
-  padding: 0 10px;
-}
+// Raíz -> owner (para que al abrir / no tire "No se puede obtener /")
+app.get("/", (req, res) => {
+  res.redirect("/owner.html?room=FLIA.VEGA-BALDOVINO");
+});
 
-video {
-  width: 95%;
-  max-width: 500px;
-  border-radius: 12px;
-  background: black;
-  margin-bottom: 8px;
-}
+const server = http.createServer(app);
 
-button {
-  margin: 10px 8px;
-  padding: 12px 20px;
-  border: none;
-  border-radius: 8px;
-  font-size: 16px;
-  background: #1f3a8a;
-  color: white;
-}
+// --- WebSocket signaling ---
+const wss = new WebSocket.Server({ server });
 
-button.danger { background: #b91c1c; }
-button.secondary { background: #334155; }
+// rooms: roomId -> Set<ws>
+const rooms = new Map();
 
-.row {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: center;
-}
-</style>
-</head>
-
-<body>
-
-<header>🔔 Timbre Digital - Propietario</header>
-
-<div id="status">Esperando llamada...</div>
-
-<video id="localVideo" autoplay playsinline muted></video>
-<video id="remoteVideo" autoplay playsinline></video>
-
-<div class="row">
-  <button id="btnAtender">Atender</button>
-  <button id="btnColgar" class="danger" style="display:none;">Colgar</button>
-  <button id="btnTestRing" class="secondary" style="display:none;">Probar timbre</button>
-</div>
-
-<script>
-const params = new URLSearchParams(window.location.search);
-const room = params.get("room");
-const testMode = params.get("test") === "1";
-
-let localStream;
-let peerConnection;
-let isRinging = false;
-
-// ---------- NOTIFICACIÓN ANDROID ----------
-function notifyAndroidRing() {
-  try {
-    if (window.Android && Android.ring) Android.ring();
-  } catch(e) {}
-}
-
-function clearAndroidRing() {
-  try {
-    if (window.Android && Android.clearRing) Android.clearRing();
-  } catch(e) {}
-}
-
-// ---------- ENTRADA DE LLAMADA (SEÑAL REAL) ----------
-function incomingCall() {
-  if (isRinging) return;
-  isRinging = true;
-  document.getElementById("status").innerText = "📲 Alguien está llamando...";
-  notifyAndroidRing();
-}
-
-// ---------- WEBRTC ----------
-async function initMedia() {
-  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  document.getElementById("localVideo").srcObject = localStream;
-}
-
-async function startCall() {
-  // Si todavía no estaba sonando, igual te dejo atender (por si tu lógica real abre directo)
-  try {
-    await initMedia();
-
-    peerConnection = new RTCPeerConnection();
-
-    localStream.getTracks().forEach(track => {
-      peerConnection.addTrack(track, localStream);
-    });
-
-    peerConnection.ontrack = event => {
-      document.getElementById("remoteVideo").srcObject = event.streams[0];
-    };
-
-    document.getElementById("status").innerText = "🎥 Llamada en curso";
-    document.getElementById("btnColgar").style.display = "inline-block";
-    document.getElementById("btnAtender").style.display = "none";
-
-    clearAndroidRing();
-    isRinging = false;
-
-    // ⚠️ IMPORTANTE:
-    // Acá es donde tu app real debería:
-    // - recibir OFFER del visitante por tu señalización
-    // - setRemoteDescription(offer)
-    // - createAnswer()
-    // - setLocalDescription(answer)
-    // - enviar ANSWER al visitante
-    //
-    // Este archivo NO incluye tu señalización, solo el UI + WebRTC base.
-
-  } catch (err) {
-    document.getElementById("status").innerText = "❌ Error al iniciar cámara/mic: " + (err?.message || err);
-    // Si falló, limpiamos ring para no quedar colgado
-    clearAndroidRing();
-    isRinging = false;
+function safeSend(ws, obj) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
   }
 }
 
-function endCall() {
-  try { if (peerConnection) peerConnection.close(); } catch(e) {}
-  peerConnection = null;
-
-  if (localStream) {
-    try { localStream.getTracks().forEach(track => track.stop()); } catch(e) {}
+function broadcast(roomId, senderWs, msgObj) {
+  const set = rooms.get(roomId);
+  if (!set) return;
+  for (const ws of set) {
+    if (ws !== senderWs && ws.readyState === WebSocket.OPEN) {
+      safeSend(ws, msgObj);
+    }
   }
-  localStream = null;
-
-  document.getElementById("localVideo").srcObject = null;
-  document.getElementById("remoteVideo").srcObject = null;
-
-  document.getElementById("status").innerText = "Esperando llamada...";
-  document.getElementById("btnColgar").style.display = "none";
-  document.getElementById("btnAtender").style.display = "inline-block";
-
-  clearAndroidRing();
-  isRinging = false;
 }
 
-document.getElementById("btnAtender").addEventListener("click", startCall);
-document.getElementById("btnColgar").addEventListener("click", endCall);
+wss.on("connection", (ws) => {
+  ws._room = null;
+  ws._role = null;
 
-// ---------- TEST SEGURO (solo si &test=1) ----------
-if (testMode) {
-  const btn = document.getElementById("btnTestRing");
-  btn.style.display = "inline-block";
-  btn.addEventListener("click", incomingCall);
-}
+  ws.on("message", (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
 
-// ---------- VALIDACIÓN ROOM ----------
-if (!room) {
-  document.getElementById("status").innerText = "⚠️ Falta el parámetro ?room=...";
-}
-</script>
+    if (msg.type === "join") {
+      const room = String(msg.room || "");
+      const role = String(msg.role || "");
+      if (!room) return;
 
-</body>
-</html>
+      ws._room = room;
+      ws._role = role;
+
+      if (!rooms.has(room)) rooms.set(room, new Set());
+      rooms.get(room).add(ws);
+
+      safeSend(ws, { type: "joined", room, role });
+      return;
+    }
+
+    // Requiere room
+    if (!ws._room) return;
+
+    // Relay a todos los demás de la sala
+    // (incluye: ring, offer, answer, candidate, hangup)
+    broadcast(ws._room, ws, { ...msg, _fromRole: ws._role || "unknown" });
+  });
+
+  ws.on("close", () => {
+    if (ws._room && rooms.has(ws._room)) {
+      const set = rooms.get(ws._room);
+      set.delete(ws);
+      if (set.size === 0) rooms.delete(ws._room);
+    }
+  });
+});
+
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => console.log("Server listening on", PORT));

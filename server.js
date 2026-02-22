@@ -1,183 +1,86 @@
-const express = require("express");
-const http = require("http");
+// server.js
 const path = require("path");
+const http = require("http");
+const express = require("express");
 const WebSocket = require("ws");
-const webpush = require("web-push");
 
 const app = express();
-app.use(express.json());
 
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-
-// ====== PWA files (content-type correcto) ======
-app.get("/manifest.webmanifest", (req, res) => {
-  res.type("application/manifest+json");
-  res.sendFile(path.join(__dirname, "public", "manifest.webmanifest"));
-});
-
-app.get("/sw.js", (req, res) => {
-  res.type("application/javascript");
-  res.sendFile(path.join(__dirname, "public", "sw.js"));
-});
-
-// ====== Health check ======
-app.get("/health", (req, res) => res.json({ ok: true }));
-
-// ====== Static ======
+// Servir estáticos
 app.use(express.static(path.join(__dirname, "public")));
 
-// ====== Web Push (VAPID) ======
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "";
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "";
-const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:example@example.com";
+// Raíz -> owner (para que al abrir / no tire "No se puede obtener /")
+app.get("/", (req, res) => {
+  res.redirect("/owner.html?room=FLIA.VEGA-BALDOVINO");
+});
 
-if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+const server = http.createServer(app);
+
+// --- WebSocket signaling ---
+const wss = new WebSocket.Server({ server });
+
+// rooms: roomId -> Set<ws>
+const rooms = new Map();
+
+function safeSend(ws, obj) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
+  }
 }
 
-// Guardamos suscripciones por roomId (en memoria)
-const pushSubs = new Map(); // Map<roomId, subscription>
-
-// Endpoint: devolver public key
-app.get("/api/push/public-key", (req, res) => {
-  res.json({ publicKey: VAPID_PUBLIC_KEY });
-});
-
-// Endpoint: guardar suscripción (desde owner)
-app.post("/api/push/subscribe", (req, res) => {
-  const { roomId, subscription } = req.body || {};
-  if (!roomId || !subscription) return res.status(400).json({ ok: false });
-  pushSubs.set(String(roomId), subscription);
-  return res.json({ ok: true });
-});
-
-async function sendPushToRoom(roomId) {
-  const sub = pushSubs.get(roomId);
-  if (!sub) return;
-
-  const payload = JSON.stringify({
-    title: "Timbre",
-    body: "¡Alguien está tocando el timbre en casa!",
-    url: `/owner.html?room=${encodeURIComponent(roomId)}`
-  });
-
-  try {
-    await webpush.sendNotification(sub, payload);
-  } catch (e) {
-    // Si la suscripción expiró, la borramos
-    if (e && (e.statusCode === 410 || e.statusCode === 404)) {
-      pushSubs.delete(roomId);
+function broadcast(roomId, senderWs, msgObj) {
+  const set = rooms.get(roomId);
+  if (!set) return;
+  for (const ws of set) {
+    if (ws !== senderWs && ws.readyState === WebSocket.OPEN) {
+      safeSend(ws, msgObj);
     }
   }
 }
 
-// ====== Signaling rooms ======
-// rooms: Map<roomId, { owner: WebSocket|null, caller: WebSocket|null }>
-const rooms = new Map();
-
-function safeSend(ws, obj) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  try { ws.send(JSON.stringify(obj)); } catch {}
-}
-
-function getOrCreateRoom(roomId) {
-  if (!rooms.has(roomId)) rooms.set(roomId, { owner: null, caller: null });
-  return rooms.get(roomId);
-}
-
-function cleanupRoomIfEmpty(roomId) {
-  const room = rooms.get(roomId);
-  if (!room) return;
-
-  const ownerGone = !room.owner || room.owner.readyState !== WebSocket.OPEN;
-  const callerGone = !room.caller || room.caller.readyState !== WebSocket.OPEN;
-
-  if (ownerGone && callerGone) rooms.delete(roomId);
-}
-
-// ====== WebSocket handling ======
 wss.on("connection", (ws) => {
-  ws._roomId = null;
+  ws._room = null;
   ws._role = null;
 
-  ws.on("message", async (data) => {
+  ws.on("message", (raw) => {
     let msg;
-    try { msg = JSON.parse(data.toString()); } catch { return; }
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
 
-    // JOIN
     if (msg.type === "join") {
-      const roomId = String(msg.roomId || "").trim();
-      const role = msg.role === "owner" ? "owner" : "caller";
-      if (!roomId) return;
+      const room = String(msg.room || "");
+      const role = String(msg.role || "");
+      if (!room) return;
 
-      ws._roomId = roomId;
+      ws._room = room;
       ws._role = role;
 
-      const room = getOrCreateRoom(roomId);
+      if (!rooms.has(room)) rooms.set(room, new Set());
+      rooms.get(room).add(ws);
 
-      // reemplazar slot si ya existía
-      if (role === "owner") room.owner = ws;
-      else room.caller = ws;
-
-      // avisar al otro
-      const other = role === "owner" ? room.caller : room.owner;
-      safeSend(other, { type: "peer-joined", role });
+      safeSend(ws, { type: "joined", room, role });
       return;
     }
 
-    const roomId = ws._roomId;
-    if (!roomId) return;
+    // Requiere room
+    if (!ws._room) return;
 
-    const room = rooms.get(roomId);
-    if (!room) return;
-
-    const other = ws._role === "owner" ? room.caller : room.owner;
-
-    // offer = el visitante apretó "Llamar"
-    if (msg.type === "offer") {
-      // 🔔 Push real: notificación en barra aunque esté en segundo plano
-      await sendPushToRoom(roomId);
-
-      safeSend(other, { type: "offer", offer: msg.offer });
-      return;
-    }
-
-    if (msg.type === "answer") {
-      safeSend(other, { type: "answer", answer: msg.answer });
-      return;
-    }
-
-    if (msg.type === "candidate") {
-      safeSend(other, { type: "candidate", candidate: msg.candidate });
-      return;
-    }
-
-    if (msg.type === "hangup") {
-      safeSend(other, { type: "hangup" });
-      return;
-    }
+    // Relay a todos los demás de la sala
+    // (incluye: ring, offer, answer, candidate, hangup)
+    broadcast(ws._room, ws, { ...msg, _fromRole: ws._role || "unknown" });
   });
 
   ws.on("close", () => {
-    const roomId = ws._roomId;
-    if (!roomId) return;
-
-    const room = rooms.get(roomId);
-    if (!room) return;
-
-    if (room.owner === ws) room.owner = null;
-    if (room.caller === ws) room.caller = null;
-
-    const other = ws._role === "owner" ? room.caller : room.owner;
-    safeSend(other, { type: "peer-left" });
-
-    cleanupRoomIfEmpty(roomId);
+    if (ws._room && rooms.has(ws._room)) {
+      const set = rooms.get(ws._room);
+      set.delete(ws);
+      if (set.size === 0) rooms.delete(ws._room);
+    }
   });
 });
 
-// ====== Start ======
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => console.log("Server listening on", PORT));

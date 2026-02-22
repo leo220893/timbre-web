@@ -1,167 +1,163 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Timbre - Llamar</title>
-  <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      margin: 16px;
-    }
-    #status {
-      padding: 10px;
-      background: #eef2ff;
-      border-radius: 8px;
-      margin-bottom: 12px;
-    }
-    button {
-      padding: 14px 18px;
-      font-size: 16px;
-      border-radius: 10px;
-      border: none;
-      margin-right: 8px;
-      cursor: pointer;
-    }
-    video {
-      width: 100%;
-      max-width: 360px;
-      background: black;
-      border-radius: 12px;
-      margin-top: 10px;
-    }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Modo Visitante</title>
+<style>
+  body{margin:0;font-family:Arial,sans-serif;background:#e8f1ff;display:flex;flex-direction:column;align-items:center}
+  header{background:#1f3a8a;color:#fff;width:100%;text-align:center;padding:15px;font-weight:700;font-size:18px}
+  #status{margin:15px;font-size:16px;font-weight:700;color:#1f3a8a;text-align:center}
+  video{width:95%;max-width:520px;border-radius:12px;background:#000;margin:6px 0}
+  .row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin:10px}
+  button{padding:12px 20px;border:none;border-radius:10px;font-size:16px;background:#1f3a8a;color:#fff}
+  button.danger{background:#b91c1c}
+</style>
 </head>
 <body>
+<header>🚪 Timbre Digital - Visitante</header>
 
-  <h2>🔔 Timbre</h2>
-  <div id="status">Estado: esperando…</div>
+<div id="status">Listo para llamar</div>
 
-  <button id="callBtn">📞 Llamar</button>
-  <button id="hangBtn" disabled>⛔ Cancelar</button>
+<video id="localVideo" autoplay playsinline muted></video>
+<video id="remoteVideo" autoplay playsinline></video>
 
-  <h4>Tu cámara</h4>
-  <video id="localVideo" autoplay muted playsinline></video>
-
-  <h4>Domicilio</h4>
-  <video id="remoteVideo" autoplay playsinline></video>
+<div class="row">
+  <button id="btnLlamar">Llamar</button>
+  <button id="btnColgar" class="danger" style="display:none;">Colgar</button>
+</div>
 
 <script>
-  const roomId =
-    new URLSearchParams(window.location.search).get("room") ||
-    "FLIA.VEGA-BALDOVINO";
+const params = new URLSearchParams(location.search);
+const room = params.get("room") || "FLIA.VEGA-BALDOVINO";
 
-  const statusEl = document.getElementById("status");
-  const callBtn = document.getElementById("callBtn");
-  const hangBtn = document.getElementById("hangBtn");
-  const localVideo = document.getElementById("localVideo");
-  const remoteVideo = document.getElementById("remoteVideo");
+const statusEl = document.getElementById("status");
+const btnLlamar = document.getElementById("btnLlamar");
+const btnColgar = document.getElementById("btnColgar");
+const localVideo = document.getElementById("localVideo");
+const remoteVideo = document.getElementById("remoteVideo");
 
-  let pc = null;
-  let localStream = null;
+let ws;
+let localStream = null;
+let pc = null;
 
-  const wsProtocol = location.protocol === "https:" ? "wss://" : "ws://";
-  const ws = new WebSocket(wsProtocol + location.host);
+function setStatus(t){ statusEl.textContent = t; }
+
+function wsUrl() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}`;
+}
+
+function connectWS(){
+  ws = new WebSocket(wsUrl());
 
   ws.onopen = () => {
-    ws.send(JSON.stringify({ type: "join", roomId, role: "caller" }));
-    statusEl.textContent = "Estado: listo para llamar";
+    ws.send(JSON.stringify({ type:"join", room, role:"visitor" }));
   };
 
-  ws.onerror = () => {
-    statusEl.textContent = "ERROR: no se pudo conectar";
-  };
+  ws.onmessage = async (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
 
-  ws.onmessage = async (event) => {
-    const msg = JSON.parse(event.data);
-
-    if (msg.type === "answer" && pc) {
-      await pc.setRemoteDescription(msg.answer);
-      statusEl.textContent = "Estado: en llamada";
+    if (msg.type === "answer") {
+      if (pc && msg.sdp) {
+        await pc.setRemoteDescription(msg.sdp);
+      }
       return;
     }
 
-    if (msg.type === "candidate" && pc) {
-      try { await pc.addIceCandidate(msg.candidate); } catch {}
+    if (msg.type === "candidate") {
+      if (pc && msg.candidate) {
+        try { await pc.addIceCandidate(msg.candidate); } catch {}
+      }
       return;
     }
 
-    if (msg.type === "hangup" || msg.type === "peer-left") {
-      endCall("Llamada finalizada");
+    if (msg.type === "hangup") {
+      endCall();
       return;
     }
   };
 
-  async function startCall() {
-    try {
-      callBtn.disabled = true;
-      hangBtn.disabled = false;
-      statusEl.textContent = "Estado: llamando…";
+  ws.onclose = () => setTimeout(connectWS, 800);
+}
 
-      localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
+async function initMediaVisitor() {
+  localStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+  localVideo.srcObject = localStream;
+}
 
-      localVideo.srcObject = localStream;
-
-      pc = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-      });
-
-      localStream.getTracks().forEach(track =>
-        pc.addTrack(track, localStream)
-      );
-
-      pc.ontrack = (event) => {
-        remoteVideo.srcObject = event.streams[0];
-      };
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          ws.send(JSON.stringify({
-            type: "candidate",
-            candidate: event.candidate
-          }));
-        }
-      };
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      ws.send(JSON.stringify({ type: "offer", offer }));
-    } catch (err) {
-      statusEl.textContent = "ERROR: " + err.message;
-      callBtn.disabled = false;
-      hangBtn.disabled = true;
-    }
-  }
-
-  function endCall(message) {
-    statusEl.textContent = "Estado: " + (message || "cancelada");
-    callBtn.disabled = false;
-    hangBtn.disabled = true;
-
-    if (pc) {
-      pc.close();
-      pc = null;
-    }
-
-    if (localStream) {
-      localStream.getTracks().forEach(t => t.stop());
-      localStream = null;
-    }
-
-    localVideo.srcObject = null;
-    remoteVideo.srcObject = null;
-  }
-
-  callBtn.addEventListener("click", startCall);
-  hangBtn.addEventListener("click", () => {
-    ws.send(JSON.stringify({ type: "hangup" }));
-    endCall("cancelada");
+function buildPC() {
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
   });
-</script>
 
+  pc.onicecandidate = (e) => {
+    if (e.candidate && ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type:"candidate", candidate: e.candidate }));
+    }
+  };
+
+  pc.ontrack = (e) => {
+    remoteVideo.srcObject = e.streams[0];
+  };
+
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+}
+
+async function startCall() {
+  btnLlamar.disabled = true;
+
+  try {
+    // 1) avisar ring al owner
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:"ring" }));
+
+    // 2) iniciar webRTC y mandar offer
+    await initMediaVisitor();
+    buildPC();
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    ws.send(JSON.stringify({ type:"offer", sdp: pc.localDescription }));
+
+    setStatus("📡 Llamando… esperando que atiendan");
+    btnColgar.style.display = "inline-block";
+    btnLlamar.style.display = "none";
+  } catch (e) {
+    console.error(e);
+    setStatus("❌ ERROR: could not start audio source / permisos");
+    btnLlamar.disabled = false;
+  }
+}
+
+function endCall() {
+  try { if (pc) pc.close(); } catch {}
+  pc = null;
+
+  try {
+    if (localStream) localStream.getTracks().forEach(t => t.stop());
+  } catch {}
+  localStream = null;
+
+  localVideo.srcObject = null;
+  remoteVideo.srcObject = null;
+
+  btnColgar.style.display = "none";
+  btnLlamar.style.display = "inline-block";
+  btnLlamar.disabled = false;
+
+  setStatus("Listo para llamar");
+}
+
+btnLlamar.addEventListener("click", startCall);
+
+btnColgar.addEventListener("click", () => {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:"hangup" }));
+  endCall();
+});
+
+connectWS();
+</script>
 </body>
 </html>
